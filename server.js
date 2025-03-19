@@ -204,6 +204,64 @@ io.on('connection', (socket) => {
       }))
     });
   });
+
+
+	// Handle get game state request
+  socket.on('get_game_state', ({ roomCode }) => {
+    console.log(`Get game state requested for room ${roomCode} by ${socket.id}`);
+    
+    const game = activeGames.get(roomCode);
+    if (!game) {
+      console.error(`Room ${roomCode} not found`);
+      socket.emit('error', { message: 'Room not found' });
+      return;
+    }
+    
+    // Find the player in the game
+    const player = game.players.find(p => p.id === socket.id);
+    if (!player) {
+      console.error(`Player ${socket.id} not found in room ${roomCode}`);
+      
+      // Try to rejoin the game
+      socket.emit('rejoin_needed');
+      return;
+    }
+    
+    // Send current game state to the player
+    socket.emit('game_state', {
+      players: game.players.map(p => ({
+        id: p.id,
+        name: p.name,
+        isHost: p.isHost,
+        isAlive: p.isAlive
+      })),
+      gameState: game.gameState,
+      currentPhase: game.currentPhase,
+      round: game.round
+    });
+    
+    // If game is already in progress, send role information
+    if (game.gameState === 'playing') {
+      socket.emit('role_assigned', {
+        role: player.role,
+        description: getRoleDescription(player.role)
+      });
+      
+      // Send current phase information
+      socket.emit('phase_changed', {
+        phase: game.currentPhase,
+        round: game.round,
+        timeLeft: 60, // Default time left
+        alivePlayers: game.players.filter(p => p.isAlive).map(p => ({
+          id: p.id,
+          name: p.name
+        }))
+      });
+    }
+  });
+	
+
+
 });
 
 
