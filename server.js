@@ -38,145 +38,96 @@ io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
   
   // Join game handler
-  socket.on('join_game', ({ roomCode, playerName, isHost }) => {
-    console.log(`Player ${playerName} joining room ${roomCode}, isHost: ${isHost}`);
-    
-    // Create room if it doesn't exist
-    if (!activeGames.has(roomCode)) {
-      activeGames.set(roomCode, {
-        players: [],
-        gameState: 'waiting',
-        settings: {},
-        roles: {},
-        currentPhase: null,
-        round: 0,
-        votes: {},
-        nightActions: {}
-      });
-    }
-    
-    const game = activeGames.get(roomCode);
-    
-    // Check if player is already in the room (reconnection)
-    const existingPlayerIndex = game.players.findIndex(p => 
-      p.name.toLowerCase() === playerName.toLowerCase()
-    );
-    
-    if (existingPlayerIndex >= 0) {
-      // Update existing player's socket ID
-      game.players[existingPlayerIndex].id = socket.id;
-      console.log(`Player ${playerName} reconnected`);
-    } else {
-      // Add new player to game
-      const player = {
-        id: socket.id,
-        name: playerName,
-        isHost: isHost === "true" || isHost === true,  // Convert string to boolean
-        isAlive: true,
-        role: null
-      };
-      
-      game.players.push(player);
-      console.log(`Added player ${playerName} as ${player.isHost ? 'host' : 'player'}`);
-    }
-    
-    // Join socket room
-    socket.join(roomCode);
-    
-    // Store room code on socket for disconnect handling
-    socket.roomCode = roomCode;
-    
-    // Notify all players in the room
-    io.to(roomCode).emit('player_joined', {
-      players: game.players.map(p => ({
-        id: p.id,
-        name: p.name,
-        isHost: p.isHost,  // Make sure this is included
-        isAlive: p.isAlive
-      }))
-    });
-  });
+ // Join game handler
+ socket.on('join_game', ({ roomCode, playerName, isHost }) => {
+	console.log(`Player ${playerName} (${socket.id}) joining room ${roomCode}, isHost: ${isHost}`);
+	
+	// Create room if it doesn't exist
+	if (!activeGames.has(roomCode)) {
+		console.log(`Creating new room: ${roomCode}`);
+		activeGames.set(roomCode, {
+			roomCode,
+			players: [],
+			gameState: 'waiting',
+			settings: {},
+			roles: {},
+			currentPhase: null,
+			round: 0,
+			votes: {},
+			nightActions: {}
+		});
+	}
+	
+	const game = activeGames.get(roomCode);
+	
+	// Add player to game if not already present
+	const existingPlayerIndex = game.players.findIndex(p => 
+		p.name.toLowerCase() === playerName.toLowerCase()
+	);
+	
+	if (existingPlayerIndex >= 0) {
+		// Update existing player's socket ID
+		game.players[existingPlayerIndex].id = socket.id;
+		console.log(`Player ${playerName} reconnected with new socket ID: ${socket.id}`);
+	} else {
+		// Add new player to game
+		const player = {
+			id: socket.id,
+			name: playerName,
+			isHost: isHost === "true" || isHost === true,
+			isAlive: true,
+			role: null
+		};
+		
+		game.players.push(player);
+		console.log(`Added new player ${playerName} to room ${roomCode}`);
+	}
+	
+	// Store room code on socket for disconnect handling
+	socket.data = { ...socket.data, roomCode, playerName };
+	
+	// Join socket room
+	socket.join(roomCode);
+	
+	// Log current players in the room
+	console.log(`Current players in room ${roomCode}:`, 
+		game.players.map(p => `${p.name}${p.isHost ? ' (Host)' : ''}`));
+	
+	// Notify all players in the room about the updated player list
+	io.to(roomCode).emit('player_joined', {
+		players: game.players.map(p => ({
+			id: p.id,
+			name: p.name,
+			isHost: p.isHost,
+			isAlive: p.isAlive
+		}))
+	});
+	
+	// Also send the initial player list to the joining player
+	socket.emit('player_list', {
+		players: game.players.map(p => ({
+			id: p.id,
+			name: p.name,
+			isHost: p.isHost,
+			isAlive: p.isAlive
+		}))
+	});
+});
   
-  // Handle game start
-  socket.on('start_game', ({ roomCode, settings }) => {
-    console.log(`Attempting to start game in room ${roomCode}`);
-    
-    const game = activeGames.get(roomCode);
-    if (!game) {
-      console.error(`Room ${roomCode} not found`);
-      socket.emit('error', { message: 'Room not found' });
-      return;
-    }
-    
-    // Find the player who is trying to start the game
-    const player = game.players.find(p => p.id === socket.id);
-    if (!player) {
-      console.error(`Player not found in room ${roomCode}`);
-      socket.emit('error', { message: 'Player not found in room' });
-      return;
-    }
-    
-    // Check if the player is the host
-    if (!player.isHost) {
-      console.error(`Non-host player tried to start game in room ${roomCode}`);
-      socket.emit('error', { message: 'Only the host can start the game' });
-      return;
-    }
-    
-    // Check if there are enough players
-    if (game.players.length < 4) {
-      console.error(`Not enough players in room ${roomCode}`);
-      socket.emit('error', { message: 'Need at least 4 players to start' });
-      return;
-    }
-    
-    console.log(`Starting game in room ${roomCode} with ${game.players.length} players`);
-    
-    // Assign roles based on settings
-    const roles = assignRoles(game.players.length, settings);
-    
-    // Assign roles to players
-    game.players.forEach((player, index) => {
-      player.role = roles[index];
-      console.log(`Assigned role ${player.role} to player ${player.name}`);
-    });
-    
-    // Update game state
-    game.gameState = 'playing';
-    game.settings = settings;
-    game.currentPhase = 'night';
-    game.round = 1;
-    
-    console.log(`Game started in room ${roomCode}`);
-    
-    // Notify all players that game has started
-    io.to(roomCode).emit('game_started');
-    
-    // Send role information to each player privately
-    game.players.forEach(player => {
-      io.to(player.id).emit('role_assigned', {
-        role: player.role,
-        description: getRoleDescription(player.role)
-      });
-    });
-    
-    // Start night phase
-    io.to(roomCode).emit('phase_changed', {
-      phase: 'night',
-      round: game.round,
-      timeLeft: 60,
-      alivePlayers: game.players.map(p => ({
-        id: p.id,
-        name: p.name,
-        isAlive: p.isAlive
-      }))
-    });
-    
-    // Set timer for phase end
-    setTimeout(() => {
-      endNightPhase(io, roomCode, game);
-    }, 60000); // 60 seconds for night phase
-  });
+ // Handle game start
+ socket.on('start_game', ({ roomCode, settings }) => {
+	// Your existing start_game handler...
+		
+		// Make sure to include all players in the game_started event
+		io.to(roomCode).emit('game_started', {
+			players: game.players.map(p => ({
+				id: p.id,
+				name: p.name,
+				isHost: p.isHost,
+				isAlive: p.isAlive
+			}))
+		});
+	});
   
   // Handle night actions (mafia kill, doctor save, etc.)
   socket.on('night_action', ({ roomCode, targetId, action }) => {
@@ -239,36 +190,12 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Handle disconnection
-  socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+  // Handle game start
+  socket.on('start_game', ({ roomCode, settings }) => {
+    // Your existing start_game handler...
     
-    const playerData = players.get(socket.id);
-    if (!playerData) return;
-    
-    const { roomCode } = playerData;
-    const game = activeGames.get(roomCode);
-    if (!game) return;
-    
-    // Remove player from game
-    game.players = game.players.filter(p => p.id !== socket.id);
-    players.delete(socket.id);
-    
-    // If no players left, remove the game
-    if (game.players.length === 0) {
-      activeGames.delete(roomCode);
-      return;
-    }
-    
-    // If host left, assign a new host
-    const hostLeft = !game.players.some(p => p.isHost);
-    if (hostLeft && game.players.length > 0) {
-      game.players[0].isHost = true;
-    }
-    
-    // Notify remaining players
-    io.to(roomCode).emit('player_left', {
-      playerId: socket.id,
+    // Make sure to include all players in the game_started event
+    io.to(roomCode).emit('game_started', {
       players: game.players.map(p => ({
         id: p.id,
         name: p.name,
