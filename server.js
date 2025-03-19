@@ -37,9 +37,9 @@ const players = new Map();
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
   
-  // Handle player joining
+  // Join game handler
   socket.on('join_game', ({ roomCode, playerName, isHost }) => {
-    console.log(`Player ${playerName} joining room ${roomCode}`);
+    console.log(`Player ${playerName} joining room ${roomCode}, isHost: ${isHost}`);
     
     // Create room if it doesn't exist
     if (!activeGames.has(roomCode)) {
@@ -57,27 +57,41 @@ io.on('connection', (socket) => {
     
     const game = activeGames.get(roomCode);
     
-    // Add player to game
-    const player = {
-      id: socket.id,
-      name: playerName,
-      isHost,
-      isAlive: true,
-      role: null
-    };
+    // Check if player is already in the room (reconnection)
+    const existingPlayerIndex = game.players.findIndex(p => 
+      p.name.toLowerCase() === playerName.toLowerCase()
+    );
     
-    game.players.push(player);
-    players.set(socket.id, { roomCode, name: playerName });
+    if (existingPlayerIndex >= 0) {
+      // Update existing player's socket ID
+      game.players[existingPlayerIndex].id = socket.id;
+      console.log(`Player ${playerName} reconnected`);
+    } else {
+      // Add new player to game
+      const player = {
+        id: socket.id,
+        name: playerName,
+        isHost: isHost === "true" || isHost === true,  // Convert string to boolean
+        isAlive: true,
+        role: null
+      };
+      
+      game.players.push(player);
+      console.log(`Added player ${playerName} as ${player.isHost ? 'host' : 'player'}`);
+    }
     
     // Join socket room
     socket.join(roomCode);
+    
+    // Store room code on socket for disconnect handling
+    socket.roomCode = roomCode;
     
     // Notify all players in the room
     io.to(roomCode).emit('player_joined', {
       players: game.players.map(p => ({
         id: p.id,
         name: p.name,
-        isHost: p.isHost,
+        isHost: p.isHost,  // Make sure this is included
         isAlive: p.isAlive
       }))
     });
@@ -85,20 +99,55 @@ io.on('connection', (socket) => {
   
   // Handle game start
   socket.on('start_game', ({ roomCode, settings }) => {
-    const game = activeGames.get(roomCode);
-    if (!game) return;
+    console.log(`Attempting to start game in room ${roomCode}`);
     
+    const game = activeGames.get(roomCode);
+    if (!game) {
+      console.error(`Room ${roomCode} not found`);
+      socket.emit('error', { message: 'Room not found' });
+      return;
+    }
+    
+    // Find the player who is trying to start the game
     const player = game.players.find(p => p.id === socket.id);
-    if (!player || !player.isHost) return;
+    if (!player) {
+      console.error(`Player not found in room ${roomCode}`);
+      socket.emit('error', { message: 'Player not found in room' });
+      return;
+    }
+    
+    // Check if the player is the host
+    if (!player.isHost) {
+      console.error(`Non-host player tried to start game in room ${roomCode}`);
+      socket.emit('error', { message: 'Only the host can start the game' });
+      return;
+    }
+    
+    // Check if there are enough players
+    if (game.players.length < 4) {
+      console.error(`Not enough players in room ${roomCode}`);
+      socket.emit('error', { message: 'Need at least 4 players to start' });
+      return;
+    }
+    
+    console.log(`Starting game in room ${roomCode} with ${game.players.length} players`);
     
     // Assign roles based on settings
-    handleGameLogic.assignRoles(game, settings);
+    const roles = assignRoles(game.players.length, settings);
+    
+    // Assign roles to players
+    game.players.forEach((player, index) => {
+      player.role = roles[index];
+      console.log(`Assigned role ${player.role} to player ${player.name}`);
+    });
     
     // Update game state
     game.gameState = 'playing';
     game.settings = settings;
     game.currentPhase = 'night';
     game.round = 1;
+    
+    console.log(`Game started in room ${roomCode}`);
     
     // Notify all players that game has started
     io.to(roomCode).emit('game_started');
@@ -107,7 +156,7 @@ io.on('connection', (socket) => {
     game.players.forEach(player => {
       io.to(player.id).emit('role_assigned', {
         role: player.role,
-        description: handleGameLogic.getRoleDescription(player.role)
+        description: getRoleDescription(player.role)
       });
     });
     
@@ -115,12 +164,17 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('phase_changed', {
       phase: 'night',
       round: game.round,
-      timeLeft: 60
+      timeLeft: 60,
+      alivePlayers: game.players.map(p => ({
+        id: p.id,
+        name: p.name,
+        isAlive: p.isAlive
+      }))
     });
     
     // Set timer for phase end
     setTimeout(() => {
-      handleGameLogic.endNightPhase(io, roomCode, game);
+      endNightPhase(io, roomCode, game);
     }, 60000); // 60 seconds for night phase
   });
   
@@ -267,3 +321,53 @@ const PORT = process.env.PORT || 3099;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
+// Helper function to assign roles
+function assignRoles(playerCount, settings) {
+  const roles = [];
+  const mafiaCount = settings.mafiaCount || 1;
+  
+  // Add mafia
+  for (let i = 0; i < mafiaCount; i++) {
+    roles.push("Mafia");
+  }
+  
+  // Add special roles
+  if (settings.includeDoctor) roles.push("Doctor");
+  if (settings.includePolice) roles.push("Police");
+  if (settings.includeTeller) roles.push("Fortune Teller");
+  if (settings.includeKiller) roles.push("Serial Killer");
+  
+  // Fill remaining with citizens
+  while (roles.length < playerCount) {
+    roles.push("Citizen");
+  }
+  
+  // Shuffle roles
+  for (let i = roles.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [roles[i], roles[j]] = [roles[j], roles[i]];
+  }
+  
+  return roles;
+}
+
+// Helper function for role descriptions
+function getRoleDescription(role) {
+  switch(role) {
+    case "Mafia":
+      return "Kill one person each night. Blend in during the day.";
+    case "Police":
+      return "Investigate one player each night to learn if they are evil.";
+    case "Doctor":
+      return "Choose one player to protect each night.";
+    case "Citizen":
+      return "Find and eliminate the Mafia during day discussions.";
+    case "Fortune Teller":
+      return "See the role of one player each night.";
+    case "Serial Killer":
+      return "Kill one person each night. Win by being the last one standing.";
+    default:
+      return "";
+  }
+}
