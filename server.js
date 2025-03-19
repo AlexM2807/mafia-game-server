@@ -225,6 +225,43 @@ io.on('connection', (socket) => {
   });
 });
 
+
+// server.js - Add a route to create rooms
+app.post('/api/rooms', (req, res) => {
+  const { hostName, settings } = req.body;
+  
+  // Generate a room code on the server
+  const roomCode = generateRoomCode();
+  
+  // Create the room in memory
+  activeGames.set(roomCode, {
+    roomCode,
+    players: [],
+    gameState: 'waiting',
+    settings: settings || {},
+    roles: {},
+    currentPhase: null,
+    round: 0,
+    votes: {},
+    nightActions: {}
+  });
+  
+  console.log(`Created room with code: ${roomCode}`);
+  
+  // Return the room code to the client
+  res.json({ roomCode });
+});
+
+// Helper function to generate a room code
+function generateRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
 // Start server
 const PORT = process.env.PORT || 3099;
 server.listen(PORT, () => {
